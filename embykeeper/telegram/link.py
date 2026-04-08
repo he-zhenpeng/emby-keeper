@@ -240,6 +240,7 @@ class Link:
                 return bool(result)
             else:
                 try:
+                    pass
                     # await self.post(
                     #     f"/auth {service} {self.instance}",
                     #     name=f"服务 {service.upper()} 认证",
