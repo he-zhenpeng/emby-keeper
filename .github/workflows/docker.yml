@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY_IMAGE: skylerhe/embykeeper
-  HF_SPACE_REPO: ekuser/ek
+  HF_SPACE_REPO: skylerhe6/ek
 
 permissions:
   contents: read
