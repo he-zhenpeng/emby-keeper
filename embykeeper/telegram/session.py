@@ -173,11 +173,14 @@ class ClientsSession:
 
     async def test_time(self):
         url = "https://ip.ddnspod.com/timestamp"
+        # url = "https://worldtimeapi.org/api/timezone/Etc/UTC"
         proxy_str = get_proxy_str(self.proxy)
         try:
             async with httpx.AsyncClient(http2=True, proxy=proxy_str) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
+                    # data = resp.json()
+                    # timestamp = int(data["unixtime"]) * 1000
                     timestamp = int(resp.content.decode())
                 else:
                     logger.warning(f"世界时间接口异常, 系统时间检测将跳过, 敬请注意. 程序将继续运行.")
@@ -188,10 +191,10 @@ class ClientsSession:
                         f"您的系统时间设置不正确, 与世界时间差距过大, 可能会导致连接失败, 敬请注意. 程序将继续运行."
                     )
         except httpx.HTTPError:
-            logger.warning(f"检测世界时间发生错误, 时间检测将被跳过.")
+            # logger.warning(f"检测世界时间发生错误, 时间检测将被跳过.")
             return False
         except Exception as e:
-            logger.warning(f"检测世界时间发生错误, 时间检测将被跳过.")
+            # logger.warning(f"检测世界时间发生错误, 时间检测将被跳过.")
             show_exception(e)
             return False
 
