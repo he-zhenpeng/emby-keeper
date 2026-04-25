@@ -1,1 +1,1 @@
-FROM embykeeper/embykeeper:v7.6.1
+FROM skylerhe/embykeeper:main-dev
