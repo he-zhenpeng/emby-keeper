@@ -1,8 +1,10 @@
 import asyncio
+import os
 import random
 from typing import Callable, Coroutine, List, Optional, Tuple, Union
 import uuid
 from io import BytesIO
+
 
 import tomli
 from loguru import logger
@@ -26,7 +28,14 @@ class LinkError(Exception):
 class Link:
     """云服务类, 用于认证和高级权限任务通讯."""
 
-    bot = "embykeeper_auth_bot"
+    # bot = "embykeeper_auth_bot"
+    DEFAULT_BOT = "embykeeper_auth_bot"
+
+    @property
+    def bot(self) -> str:
+        """云端服务 bot, 可通过环境变量 EK_AUTH_BOT 指向自建 bot."""
+        return os.environ.get("EK_AUTH_BOT", "").strip() or self.DEFAULT_BOT
+    
     post_count = 0
 
     def __init__(self, client: Client):
@@ -152,7 +161,8 @@ class Link:
                             self.log.warning(msg)
                             return None
                 except YouBlockedUser:
-                    msg = "您在账户中禁用了用于 API 信息传递的 Bot: @embykeeper_auth_bot, 这将导致 embykeeper 无法运行, 请尝试取消禁用."
+                    # msg = "您在账户中禁用了用于 API 信息传递的 Bot: @embykeeper_auth_bot, 这将导致 embykeeper 无法运行, 请尝试取消禁用."
+                    msg = f"您在账户中禁用了用于 API 信息传递的 Bot: @{self.bot}, ..."
                     if fail:
                         raise LinkError(msg)
                     else:
