@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .auth import require_auth
 from .config import _read_config_dict, _write_config_dict
@@ -293,6 +293,68 @@ async def get_telegram_account(phone: str, _: bool = Depends(require_auth)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load telegram account: {e}")
+
+
+def _validate_manual_checkin_sites(
+    requested: List[str], desired: set
+) -> Tuple[List[str], List[str]]:
+    """去重并拆分手动签到请求的站点: 返回 (有效站点, 未知站点)."""
+    seen: set = set()
+    valid: List[str] = []
+    unknown: List[str] = []
+    for site in requested or []:
+        name = (site or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        (valid if name in desired else unknown).append(name)
+    return valid, unknown
+
+
+class ManualCheckinPayload(BaseModel):
+    sites: List[str] = Field(default_factory=list)
+
+
+@router.post("/telegram/accounts/{phone}/checkin")
+async def trigger_manual_checkin(
+    phone: str, payload: ManualCheckinPayload, _: bool = Depends(require_auth)
+):
+    """手动签到: 仅对指定账号跑选中的站点, 后台执行, 凭 run_id 轮询结果."""
+    try:
+        from ..telegram.checkin_main import CheckinerManager
+
+        # 触发前确保 config_manager 与配置源同步, 避免读到已删除的账号
+        await config_manager.reload_conf()
+        cfg = _load_config()
+        accounts = cfg.telegram.account if cfg.telegram and cfg.telegram.account else []
+        account = next((a for a in accounts if a.phone == phone), None)
+        if account is None:
+            raise HTTPException(status_code=404, detail="Telegram account not found")
+        if not account.enabled:
+            raise HTTPException(status_code=400, detail="该账号未启用")
+        if not account.checkiner:
+            raise HTTPException(status_code=400, detail="该账号未启用签到")
+
+        manager = CheckinerManager()
+        valid_sites, unknown_sites = _validate_manual_checkin_sites(
+            payload.sites, manager._desired_site_names(account)
+        )
+        if unknown_sites:
+            raise HTTPException(
+                status_code=400,
+                detail=f"以下站点不在该账号的签到范围内: {', '.join(unknown_sites)}",
+            )
+        if not valid_sites:
+            raise HTTPException(status_code=400, detail="请至少选择一个签到站点")
+
+        ctx = RunContext.prepare(description=f"手动签到 - {phone}")
+        ctx.start(RunStatus.INITIALIZING)
+        asyncio.create_task(manager.run_selected_sites(ctx, account, valid_sites))
+        return {"success": True, "run_id": ctx.id, "sites": valid_sites}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"启动手动签到失败: {e}")
 
 
 @router.post("/telegram/accounts")

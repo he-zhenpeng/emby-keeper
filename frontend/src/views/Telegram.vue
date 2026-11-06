@@ -93,6 +93,20 @@ const testCode = ref('')
 const testPhase = ref<'idle' | 'code' | 'password' | 'done'>('idle')
 const testPolling = ref(false)
 let testPollTimer: ReturnType<typeof setInterval> | null = null
+type ManualCheckinSiteResult = {
+  site: string
+  status: string | null
+  status_info?: string | null
+  run_id?: string | null
+}
+const checkinSites = ref<string[]>([])
+const checkinRunning = ref(false)
+const checkinError = ref('')
+const checkinRunId = ref('')
+const checkinParentStatus = ref('')
+const checkinParentInfo = ref('')
+const checkinResults = ref<ManualCheckinSiteResult[]>([])
+let checkinPollTimer: ReturnType<typeof setInterval> | null = null
 const connectionInfoOpen = ref(false)
 const sitesLoading = ref(false)
 const siteNames = ref<{ checkiner: string[], monitor: string[], messager: string[], registrar: string[] }>({
@@ -165,6 +179,135 @@ const checkinResultFilterOptions: UiSelectOption[] = [
   { label: '部分失败', value: 'partial_failed' },
   { label: '全部失败', value: 'failed' },
 ]
+
+const effectiveCheckinSites = computed(() => {
+  const account = currentAccount.value
+  if (!account) return []
+  return (account.site?.checkiner ?? siteNames.value.checkiner).filter(Boolean)
+})
+
+const checkinSiteLabel = (site: string) => siteDisplayNames.value.checkiner?.[site] || site
+
+const isCheckinRunActive = (status?: string | null) =>
+  ['PENDING', 'INITIALIZING', 'RUNNING'].includes(String(status || ''))
+
+const checkinStatusText = (status?: string | null) => {
+  switch (String(status || '')) {
+    case 'SUCCESS': return '成功'
+    case 'NONEED': return '已签到'
+    case 'FAIL':
+    case 'ERROR': return '失败'
+    case 'RESCHEDULE': return '稍后重试'
+    case 'IGNORE': return '跳过'
+    case 'RUNNING':
+    case 'INITIALIZING':
+    case 'PENDING': return '进行中'
+    default: return '未知'
+  }
+}
+
+const checkinStatusVariant = (status?: string | null) => {
+  switch (String(status || '')) {
+    case 'SUCCESS':
+    case 'NONEED': return 'success'
+    case 'FAIL':
+    case 'ERROR': return 'error'
+    case 'RESCHEDULE':
+    case 'IGNORE': return 'warning'
+    default: return 'default'
+  }
+}
+
+const stopCheckinPolling = () => {
+  if (checkinPollTimer) {
+    window.clearInterval(checkinPollTimer)
+    checkinPollTimer = null
+  }
+}
+
+const resetCheckinState = () => {
+  stopCheckinPolling()
+  checkinSites.value = []
+  checkinRunning.value = false
+  checkinError.value = ''
+  checkinRunId.value = ''
+  checkinParentStatus.value = ''
+  checkinParentInfo.value = ''
+  checkinResults.value = []
+}
+
+const refreshCheckinRun = async (silent = false) => {
+  if (!checkinRunId.value) return
+
+  try {
+    const runData = await auth.request(`/runinfo/${checkinRunId.value}`)
+    checkinParentStatus.value = runData.run?.status || ''
+    checkinParentInfo.value = runData.run?.status_info || ''
+    const childrenData = await auth.request(`/runinfo/${checkinRunId.value}/children`)
+    checkinResults.value = (childrenData.runs || []).map((run: { description?: string, status?: string | null, status_info?: string | null, id?: string }) => ({
+      site: String(run.description || '').replace(/ 站点签到$/, ''),
+      status: run.status || null,
+      status_info: run.status_info || null,
+      run_id: run.id,
+    }))
+    if (!isCheckinRunActive(checkinParentStatus.value)) {
+      stopCheckinPolling()
+      checkinRunning.value = false
+      await fetchAccounts()
+    }
+  } catch (error) {
+    logger.error('Failed to refresh manual checkin run', error)
+    if (!silent) {
+      checkinError.value = logger.message(error, '签到结果加载失败')
+    }
+  }
+}
+
+const startCheckinPolling = () => {
+  stopCheckinPolling()
+  checkinPollTimer = window.setInterval(() => {
+    refreshCheckinRun(true)
+  }, 2000)
+}
+
+const toggleCheckinSite = (site: string) => {
+  const next = new Set(checkinSites.value)
+  if (next.has(site)) next.delete(site)
+  else next.add(site)
+  checkinSites.value = [...next]
+}
+
+const startManualCheckin = async () => {
+  if (!currentAccount.value || !checkinSites.value.length) return
+
+  checkinRunning.value = true
+  checkinError.value = ''
+  checkinResults.value = []
+  checkinParentStatus.value = ''
+  checkinParentInfo.value = ''
+  stopCheckinPolling()
+
+  try {
+    const data = await auth.request(`/telegram/accounts/${encodeURIComponent(currentAccount.value.phone)}/checkin`, {
+      method: 'POST',
+      body: JSON.stringify({ sites: checkinSites.value }),
+    })
+    checkinRunId.value = data.run_id || ''
+    if (!checkinRunId.value) {
+      throw new Error('签到任务已提交，但暂时还没有可读取的运行记录')
+    }
+    await refreshCheckinRun()
+    if (isCheckinRunActive(checkinParentStatus.value)) {
+      startCheckinPolling()
+    } else {
+      checkinRunning.value = false
+    }
+  } catch (error) {
+    logger.error('Failed to start manual checkin', error)
+    checkinError.value = logger.message(error, '启动手动签到失败')
+    checkinRunning.value = false
+  }
+}
 
 const accountDetailItems = computed(() => {
   if (!currentAccount.value) {
@@ -325,9 +468,11 @@ const openEditDrawer = (account: TelegramAccountItem) => {
 
 const openDetailDrawer = async (account: TelegramAccountItem) => {
   pageError.value = ''
+  resetCheckinState()
   try {
     const data = await auth.request(`/telegram/accounts/${encodeURIComponent(account.phone)}`)
     currentAccount.value = data.account
+    checkinSites.value = [...effectiveCheckinSites.value]
     detailOpen.value = true
   } catch (error) {
     logger.error('Failed to fetch account detail', error)
@@ -582,8 +727,15 @@ watch(drawerOpen, (open) => {
   }
 })
 
+watch(detailOpen, (open) => {
+  if (!open) {
+    resetCheckinState()
+  }
+})
+
 onBeforeUnmount(() => {
   resetTestState()
+  resetCheckinState()
 })
 </script>
 
@@ -720,6 +872,9 @@ onBeforeUnmount(() => {
         <div class="mt-5 flex flex-wrap gap-2">
           <UiButton size="sm" variant="ghost" @click="openDetailDrawer(account)">
             查看
+          </UiButton>
+          <UiButton v-if="account.checkiner" size="sm" variant="secondary" @click="openDetailDrawer(account)">
+            手动签到
           </UiButton>
           <UiButton size="sm" variant="secondary" @click="openEditDrawer(account)">
             <PencilSquareIcon class="mr-2 h-4 w-4" />
@@ -972,6 +1127,58 @@ onBeforeUnmount(() => {
               <p class="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{{ item.label }}</p>
               <p class="mt-2 break-all text-sm font-medium text-slate-900">{{ item.value }}</p>
             </div>
+          </div>
+        </UiCard>
+
+        <UiCard v-if="currentAccount.checkiner">
+          <div>
+            <h3 class="text-base font-semibold text-slate-950">手动签到</h3>
+            <p class="mt-1 text-sm text-slate-500">勾选要签到的站点，立即执行一次签到，签到结果会逐站显示在这里。</p>
+          </div>
+
+          <div v-if="effectiveCheckinSites.length === 0" class="mt-4 rounded-[18px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            该账号没有可签到的站点，请先在编辑中设置签到站点范围。
+          </div>
+
+          <div v-else class="mt-4 flex flex-wrap gap-2">
+            <label
+              v-for="site in effectiveCheckinSites"
+              :key="site"
+              class="inline-flex cursor-pointer items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium"
+              :class="checkinSites.includes(site) ? 'border-primary-600 bg-primary-50 text-primary-700' : 'border-slate-200 bg-white text-slate-600'"
+            >
+              <input type="checkbox" :checked="checkinSites.includes(site)" :disabled="checkinRunning" class="h-4 w-4 accent-primary-600" @change="toggleCheckinSite(site)" />
+              {{ checkinSiteLabel(site) }}
+            </label>
+          </div>
+
+          <div class="mt-4 flex flex-wrap items-center gap-2">
+            <UiButton :loading="checkinRunning" :disabled="checkinSites.length === 0 || checkinRunning" @click="startManualCheckin">
+              开始签到
+            </UiButton>
+            <UiBadge v-if="checkinParentStatus" :variant="checkinStatusVariant(checkinParentStatus)">
+              {{ checkinStatusText(checkinParentStatus) }}
+            </UiBadge>
+            <span v-if="checkinParentInfo" class="text-xs text-slate-500">{{ checkinParentInfo }}</span>
+          </div>
+
+          <div v-if="checkinError" class="mt-3 rounded-[18px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {{ checkinError }}
+          </div>
+
+          <div v-if="checkinResults.length" class="mt-4 space-y-2">
+            <div v-for="result in checkinResults" :key="result.site" class="flex items-center justify-between gap-3 rounded-[16px] border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+              <span class="font-medium text-slate-900">{{ checkinSiteLabel(result.site) }}</span>
+              <span class="flex shrink-0 items-center gap-2">
+                <span v-if="result.status_info" class="hidden text-xs text-slate-500 sm:inline">{{ result.status_info }}</span>
+                <UiBadge :variant="checkinStatusVariant(result.status)">
+                  {{ checkinStatusText(result.status) }}
+                </UiBadge>
+              </span>
+            </div>
+            <router-link to="/runinfo" class="inline-block text-xs font-medium text-primary-600 hover:text-primary-700">
+              在任务记录中查看详情
+            </router-link>
           </div>
         </UiCard>
 

@@ -2,13 +2,23 @@ import asyncio
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+import tomli as tomllib
+import tomlkit
 
 from pydantic import BaseModel, Field, ValidationError
 
+from .auth import require_auth
 from ..config import config as config_manager
 from ..schema import Config as CoreConfig, format_errors
 from ..utils import deep_update
+from ..vision import (
+    DEFAULT_VISION_API_KEY,
+    DEFAULT_VISION_BASE_URL,
+    DEFAULT_VISION_MODEL,
+    normalize_vision_base_url,
+    resolve_vision_config,
+)
 
 router = APIRouter()
 
@@ -93,6 +103,13 @@ class SchedulerSettingsPayload(BaseModel):
 class NetworkSettingsPayload(BaseModel):
     telegram_use_proxy: bool = True
     proxy: ProxySettingsPayload = Field(default_factory=ProxySettingsPayload)
+
+
+class VisionSettingsPayload(BaseModel):
+    base_url: str = Field(DEFAULT_VISION_BASE_URL, pattern=r"^https?://\S+$")
+    # 默认值即原先硬编码的共享 Key: 面板不改就沿用它, 填了自己的就覆盖它.
+    api_key: str = DEFAULT_VISION_API_KEY
+    model: str = Field(DEFAULT_VISION_MODEL, min_length=1)
 
 
 def _load_model() -> CoreConfig:
@@ -351,6 +368,40 @@ def _serialize_network_settings(model: CoreConfig) -> Dict[str, Any]:
     ).model_dump()
 
 
+def _serialize_vision_settings(model: CoreConfig) -> Dict[str, Any]:
+    """面板里的视觉配置: 返回配置文件里的值, 并标注环境变量覆盖情况.
+
+    注意: 这里返回的 api_key 是配置文件里的值 (面板已登录, 与代理密码
+    的处理方式一致); 实际生效值可能被环境变量覆盖, 见 env_overrides,
+    终点站签到时按 环境变量 > 配置文件 > 默认值 解析 (embykeeper.vision).
+    """
+    vision = model.vision
+    resolved = resolve_vision_config(vision)
+    return {
+        "base_url": (vision.base_url.strip() if vision and vision.base_url else DEFAULT_VISION_BASE_URL),
+        "model": (vision.model.strip() if vision and vision.model else DEFAULT_VISION_MODEL),
+        # 未填时返回内置默认 Key (原先硬编码的共享 Key), 面板输入框里就是这个默认值.
+        "api_key": (vision.api_key or DEFAULT_VISION_API_KEY) if vision else DEFAULT_VISION_API_KEY,
+        "has_api_key": bool(resolved.api_key),
+        "env_overrides": list(resolved.env_overrides),
+        "effective_base_url": resolved.base_url,
+        "effective_model": resolved.model,
+    }
+
+
+def _build_vision_update(payload: VisionSettingsPayload) -> Dict[str, Any]:
+    return {
+        "vision": {
+            # 存成归一化后的根地址 (去掉 /chat/completions 后缀), 下次打开面板
+            # 显示的就是干净的 base_url, 调用时再统一拼后缀.
+            "base_url": normalize_vision_base_url(payload.base_url),
+            # 留空 = 不存, 下次读取时由 schema 默认值补回内置默认 Key.
+            "api_key": payload.api_key.strip() or None,
+            "model": payload.model.strip(),
+        },
+    }
+
+
 def _build_basic_update(payload: BasicSettingsPayload) -> Dict[str, Any]:
     return {
         "nofail": payload.nofail,
@@ -500,6 +551,62 @@ async def save_config(payload: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=f"保存配置失败: {e}")
 
 
+def _validate_raw_config(content: str) -> Dict[str, Any]:
+    """解析并校验 config.toml 原文, 返回解析后的配置; 格式或校验失败时抛 ValueError."""
+    text = content or ""
+    try:
+        parsed = tomllib.loads(text) if text.strip() else {}
+    except Exception as e:
+        raise ValueError(f"配置文件格式错误: {e}") from e
+    try:
+        CoreConfig(**parsed)
+    except ValidationError as e:
+        raise ValueError(format_errors(e)) from e
+    return parsed
+
+
+def _write_config_raw(content: str):
+    """原样写回配置 (保留注释与格式), 写后同步内存配置.
+
+    走当前配置源: 文件模式写 config.toml, MongoDB 模式写数据库里的
+    base64 TOML 文档, 两种模式下编辑器行为一致.
+    """
+    config_manager.active_source().write_text(content or "")
+    # 写后强制同步 config_manager 内存（watchdog awatch 不总是触发 reload）
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(config_manager.reload_conf())
+    except RuntimeError:
+        pass
+
+
+class RawConfigPayload(BaseModel):
+    content: str = Field(default="")
+
+
+@router.get("/config/raw")
+async def get_raw_config(_: bool = Depends(require_auth)):
+    try:
+        source = config_manager.active_source()
+        content = source.read_text()
+        return {"content": content, "path": source.describe()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"加载配置文件失败: {e}")
+
+
+@router.post("/config/raw")
+async def save_raw_config(payload: RawConfigPayload, _: bool = Depends(require_auth)):
+    try:
+        _validate_raw_config(payload.content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        _write_config_raw(payload.content)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存配置文件失败: {e}")
+
+
 @router.get("/settings")
 async def get_system_settings():
     try:
@@ -617,3 +724,23 @@ async def save_network_settings(payload: NetworkSettingsPayload):
         raise HTTPException(status_code=400, detail=format_errors(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存网络设置失败: {e}")
+
+
+@router.get("/settings/vision")
+async def get_vision_settings(_: bool = Depends(require_auth)):
+    try:
+        return _serialize_vision_settings(_load_model())
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=format_errors(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"加载视觉设置失败: {e}")
+
+
+@router.post("/settings/vision")
+async def save_vision_settings(payload: VisionSettingsPayload, _: bool = Depends(require_auth)):
+    try:
+        return _save_partial_settings(_build_vision_update(payload))
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=format_errors(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存视觉设置失败: {e}")

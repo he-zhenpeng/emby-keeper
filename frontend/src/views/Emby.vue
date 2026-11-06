@@ -113,6 +113,8 @@ const testStarting = ref(false)
 const testRunId = ref('')
 const testRun = ref<EmbyRunItem | null>(null)
 const testRunLogs = ref<EmbyRunLog[]>([])
+const runMode = ref<'test' | 'keepalive'>('test')
+const keepaliveStarting = ref(false)
 const testLogsEndpoint = ref<string | null>(null)
 const testError = ref('')
 const formMode = ref<'create' | 'edit'>('create')
@@ -433,6 +435,8 @@ const resetTestState = () => {
   testRun.value = null
   testRunLogs.value = []
   testError.value = ''
+  runMode.value = 'test'
+  keepaliveStarting.value = false
 }
 
 const sameRunLog = (left: EmbyRunLog | null | undefined, right: EmbyRunLog | null | undefined) => {
@@ -653,6 +657,7 @@ const openDetailDrawer = async (account: EmbyAccountItem) => {
 const startAccountTestRun = async () => {
   if (!currentAccountKey.value) return
 
+  runMode.value = 'test'
   testStarting.value = true
   testError.value = ''
   detailTab.value = 'test'
@@ -687,6 +692,51 @@ const startAccountTestRun = async () => {
   } finally {
     testStarting.value = false
   }
+}
+
+const startAccountKeepalive = async () => {
+  if (!currentAccountKey.value) return
+
+  runMode.value = 'keepalive'
+  keepaliveStarting.value = true
+  testError.value = ''
+  detailTab.value = 'test'
+  stopTestPolling()
+
+  try {
+    const encodedKey = encodeURIComponent(currentAccountKey.value)
+    const data = await auth.request(`/emby/accounts/keepalive?key=${encodedKey}`, { method: 'POST' })
+    testRunId.value = data.run_id || ''
+
+    if (!testRunId.value) {
+      await refreshCurrentAccount()
+      const fallbackRun = currentAccount.value?.run_history?.find((run) => isActiveRun(run.status)) || currentAccount.value?.run_history?.[0]
+      testRunId.value = fallbackRun?.id || ''
+    }
+
+    if (!testRunId.value) {
+      throw new Error('保活任务已提交，但暂时还没有可读取的运行记录')
+    }
+
+    const bundle = await fetchRunBundle(testRunId.value)
+    testRun.value = bundle.run
+    testRunLogs.value = bundle.logs
+    syncTestLogsStream()
+    await refreshTestRun()
+    if (isActiveRun(testRun.value?.status)) {
+      startTestPolling()
+    }
+  } catch (error) {
+    logger.error('Failed to start emby account keepalive', error)
+    testError.value = logger.message(error, '启动手动保活失败')
+  } finally {
+    keepaliveStarting.value = false
+  }
+}
+
+const openKeepaliveDrawer = async (account: EmbyAccountItem) => {
+  await openDetailDrawer(account)
+  detailTab.value = 'test'
 }
 
 const submitForm = async () => {
@@ -1071,6 +1121,9 @@ watch([detailOpen, detailTab, testRunId, formTestActive], () => {
             <UiButton size="sm" variant="ghost" @click.stop="openDetailDrawer(account)">
               保活记录
             </UiButton>
+            <UiButton size="sm" variant="secondary" @click.stop="openKeepaliveDrawer(account)">
+              手动保活
+            </UiButton>
             <UiButton size="sm" variant="secondary" @click.stop="openEditDrawer(account)">
               <PencilSquareIcon class="mr-2 h-4 w-4" />
               编辑
@@ -1438,13 +1491,19 @@ watch([detailOpen, detailTab, testRunId, formTestActive], () => {
             <UiCard padding="sm">
               <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div class="flex items-center gap-2">
-                  <h4 class="text-base font-semibold text-slate-950">测试运行</h4>
+                  <h4 class="text-base font-semibold text-slate-950">{{ runMode === 'keepalive' ? '手动保活' : '测试运行' }}</h4>
                   <ArrowPathIcon v-if="testLogsConnected" class="h-4 w-4 animate-spin text-emerald-500" />
                 </div>
-                <UiButton :loading="testStarting" @click="startAccountTestRun">
-                  立刻运行
-                </UiButton>
+                <div class="flex flex-wrap gap-2">
+                  <UiButton :loading="testStarting" @click="startAccountTestRun">
+                    立刻运行
+                  </UiButton>
+                  <UiButton variant="secondary" :loading="keepaliveStarting" @click="startAccountKeepalive">
+                    手动保活
+                  </UiButton>
+                </div>
               </div>
+              <p class="mt-3 text-xs leading-5 text-slate-400">「立刻运行」只做连接测试；「手动保活」会完整执行一次播放保活，结果实时显示在这里。</p>
 
               <div v-if="testError" class="mt-4 rounded-[16px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                 {{ testError }}

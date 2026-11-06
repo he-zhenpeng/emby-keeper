@@ -494,6 +494,57 @@ async def start_emby_account_test_run(
         raise HTTPException(status_code=500, detail=f"Failed to start emby account test run: {e}")
 
 
+@router.post("/emby/accounts/keepalive")
+async def start_emby_account_keepalive(
+    key: str = Query(...),
+    _: bool = Depends(require_auth),
+):
+    """手动保活: 对单个 Emby 账号立即执行一次完整播放保活, 后台执行, 凭 run_id 轮询结果."""
+    try:
+        account = _find_account_by_key(key)
+        if not account.enabled:
+            raise HTTPException(status_code=400, detail="该账号未启用")
+
+        description = f"手动保活 - {_account_spec(account)}"
+        manager = EmbyManager()
+        task = asyncio.create_task(
+            manager._watch_main(
+                [account.model_copy(update={"enabled": True})],
+                instant=True,
+                description=description,
+            )
+        )
+
+        existing_ids = {ctx.id for ctx in RunContext.list_all()}
+        run_id = None
+        for _ in range(30):
+            for ctx in RunContext.list_all():
+                if ctx.id not in existing_ids and ctx.description == description:
+                    run_id = ctx.id
+                    break
+
+            if run_id:
+                break
+
+            if task.done():
+                break
+
+            await asyncio.sleep(0.1)
+
+        if not run_id and task.done() and not task.cancelled():
+            result = task.result()
+            run_id = result.id if result else None
+
+        if not run_id:
+            raise HTTPException(status_code=500, detail="保活任务已提交, 但暂时还没有可读取的运行记录")
+
+        return {"success": True, "run_id": run_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"启动手动保活失败: {e}")
+
+
 @router.post("/emby/accounts/probe-item")
 async def probe_emby_play_item(
     payload: EmbyPlayIdProbePayload,

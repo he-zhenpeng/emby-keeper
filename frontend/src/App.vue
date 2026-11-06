@@ -13,6 +13,7 @@ import {
   ChartBarIcon,
   PuzzlePieceIcon,
   Cog6ToothIcon,
+  DocumentTextIcon,
   ArrowRightOnRectangleIcon
 } from '@heroicons/vue/24/outline'
 
@@ -29,6 +30,7 @@ const navigation = [
   { name: '任务记录', href: '/runinfo', icon: ChartBarIcon },
   { name: '自定义站点', href: '/sites', icon: PuzzlePieceIcon },
   { name: '系统设置', href: '/settings', icon: Cog6ToothIcon },
+  { name: '配置文件', href: '/config-file', icon: DocumentTextIcon },
 ]
 
 const isLoginPage = computed(() => route.path === '/login')

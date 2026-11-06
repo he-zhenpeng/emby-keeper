@@ -804,6 +804,60 @@ class CheckinerManager:
                 else:
                     log.debug("站点重新签到失败.")
 
+    async def run_selected_sites(self, ctx: RunContext, account: TelegramAccount, site_names: List[str]):
+        """手动签到: 仅对指定账号跑选中的站点, 共用一个客户端依次执行.
+
+        返回逐站结果 [{"site", "status", "status_info", "run_id"}],
+        父级 ctx 由本方法按汇总结果结束, 调用方凭 ctx.id 轮询即可.
+        """
+        specs, _, config_to_use = self._build_checkin_specs(account)
+        wanted = set(site_names)
+        selected = [spec for spec in specs if spec.site_name in wanted]
+        if not selected:
+            ctx.finish(RunStatus.NONEED, "没有可选的签到站点")
+            return []
+
+        results: List[Dict[str, Optional[str]]] = []
+        pairs: Dict[str, Tuple[BaseBotCheckin, RunContext]] = {}
+        try:
+            async with ClientsSession([account]) as clients:
+                async for _, client in clients:
+                    if not await Link(client).auth("checkiner", log_func=logger.error):
+                        ctx.finish(RunStatus.FAIL, "Telegram 登录验证失败")
+                        return results
+
+                    for spec in selected:
+                        site_ctx = RunContext.prepare(
+                            f"{spec.site_name} 站点签到", parent_ids=[ctx.id]
+                        )
+                        checkiner: BaseBotCheckin = spec.cls(
+                            client,
+                            context=site_ctx,
+                            retries=config_to_use.retries,
+                            timeout=config_to_use.timeout,
+                            config=config_to_use.get_site_config(spec.site_name),
+                        )
+                        result = await checkiner._start()
+                        pairs[spec.key] = (checkiner, result)
+                        results.append(
+                            {
+                                "site": spec.site_name,
+                                "status": result.status.name if result.status else None,
+                                "status_info": result.status_info,
+                                "run_id": site_ctx.id,
+                            }
+                        )
+        except Exception as e:
+            show_exception(e, regular=False)
+            if not ctx.end_time:
+                ctx.finish(RunStatus.ERROR, f"手动签到异常: {e}")
+            return results
+
+        finish_status, finish_info = self._log_batch_summary(pairs, logger)
+        if finish_status is not None and not ctx.end_time:
+            ctx.finish(finish_status, finish_info)
+        return results
+
     def new_ctx(self):
         now = datetime.now()
         return RunContext.get_or_create(

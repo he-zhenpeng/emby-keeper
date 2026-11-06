@@ -2,6 +2,12 @@ from typing import List, Optional, Union, Dict, Any, ClassVar
 from pydantic import BaseModel, Field, model_validator, ValidationError
 from pydantic.networks import HttpUrl
 
+from .vision import (
+    DEFAULT_VISION_API_KEY,
+    DEFAULT_VISION_BASE_URL,
+    DEFAULT_VISION_MODEL,
+)
+
 DEFAULT_TIME_RANGE = "<11:00AM,11:00PM>"
 DEFAULT_EMBY_INTERVAL_DAYS = "<7,12>"
 
@@ -117,6 +123,18 @@ class SiteConfig(ConfigModel):
     monitor: Optional[List[str]] = None
     messager: Optional[List[str]] = None
     registrar: Optional[List[str]] = None
+
+
+class VisionConfig(ConfigModel):
+    """验证码视觉识别配置 (仅终点站使用, 面板「系统设置 - 视觉识别」写入).
+
+    base_url 为 OpenAI 兼容的 API 根地址, 不含 /chat/completions 后缀
+    (旧版完整端点写法在读取时会自动归一化, 见 embykeeper.vision).
+    """
+
+    base_url: Optional[str] = DEFAULT_VISION_BASE_URL
+    api_key: Optional[str] = DEFAULT_VISION_API_KEY
+    model: Optional[str] = DEFAULT_VISION_MODEL
 
 
 class MediaServerBaseConfig(ConfigModel):
@@ -267,6 +285,7 @@ class Config(ConfigModel):
     telegram: Optional[TelegramConfig] = TelegramConfig()
     notifier: Optional[NotifierConfig] = NotifierConfig()
     site: Optional[SiteConfig] = None
+    vision: Optional[VisionConfig] = VisionConfig()
 
     # 向后兼容字段
     time: Optional[str] = None

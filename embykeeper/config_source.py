@@ -43,6 +43,14 @@ class ConfigSource:
     def write(self, cfg: Dict[str, Any]) -> None:
         raise NotImplementedError
 
+    def read_text(self) -> str:
+        """Return the raw TOML document text (empty when nothing is stored)."""
+        raise NotImplementedError
+
+    def write_text(self, text: str) -> None:
+        """Replace the whole TOML document with raw text."""
+        raise NotImplementedError
+
     def describe(self) -> str:
         raise NotImplementedError
 
@@ -83,6 +91,23 @@ class FileConfigSource(ConfigSource):
         except OSError as exc:
             raise ConfigSourceError(f'无法写入配置文件 "{self.path}": {exc}') from exc
 
+    def read_text(self) -> str:
+        if not self.path.exists():
+            return ""
+        try:
+            return self.path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigSourceError(f'无法读取配置文件 "{self.path}": {exc}') from exc
+
+    def write_text(self, text: str) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(text or "", encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError as exc:
+            raise ConfigSourceError(f'无法写入配置文件 "{self.path}": {exc}') from exc
+
 
 class MongoConfigSource(ConfigSource):
     def __init__(self, url: str, collection=None):
@@ -120,6 +145,22 @@ class MongoConfigSource(ConfigSource):
 
     def write(self, cfg: Dict[str, Any]) -> None:
         value = encode_config(tomlkit.dumps(cfg))
+        try:
+            self._collection.update_one({"_id": CONFIG_DOC_ID}, {"$set": {"value": value}}, upsert=True)
+        except Exception as exc:
+            raise ConfigSourceError(f"向 MongoDB 写入配置失败: {exc}") from exc
+
+    def read_text(self) -> str:
+        try:
+            doc = self._collection.find_one({"_id": CONFIG_DOC_ID})
+        except Exception as exc:
+            raise ConfigSourceError(f"从 MongoDB 读取配置失败: {exc}") from exc
+        if not doc or not doc.get("value"):
+            return ""
+        return decode_config(doc["value"])
+
+    def write_text(self, text: str) -> None:
+        value = encode_config(text or "")
         try:
             self._collection.update_one({"_id": CONFIG_DOC_ID}, {"$set": {"value": value}}, upsert=True)
         except Exception as exc:

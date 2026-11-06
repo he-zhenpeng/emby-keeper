@@ -15,7 +15,7 @@ import { logger } from '@/utils/logger'
 
 const auth = useAuthStore()
 
-type SectionKey = 'basic' | 'notifier' | 'scheduler' | 'network'
+type SectionKey = 'basic' | 'notifier' | 'scheduler' | 'network' | 'vision'
 type SaveState = 'idle' | 'saved' | 'error'
 type TelegramNotifierAccount = {
   phone: string
@@ -23,17 +23,18 @@ type TelegramNotifierAccount = {
   enabled: boolean
 }
 
-const sectionOrder: SectionKey[] = ['basic', 'notifier', 'scheduler', 'network']
+const sectionOrder: SectionKey[] = ['basic', 'notifier', 'scheduler', 'network', 'vision']
 const sectionTitleMap: Record<SectionKey, string> = {
   basic: '基础运行',
   notifier: '通知设置',
   scheduler: '任务调度',
   network: '网络代理',
+  vision: '视觉识别',
 }
 
-const loading = reactive({ basic: false, notifier: false, scheduler: false, network: false })
-const saving = reactive({ basic: false, notifier: false, scheduler: false, network: false })
-const loadError = reactive({ basic: '', notifier: '', scheduler: '', network: '' })
+const loading = reactive({ basic: false, notifier: false, scheduler: false, network: false, vision: false })
+const saving = reactive({ basic: false, notifier: false, scheduler: false, network: false, vision: false })
+const loadError = reactive({ basic: '', notifier: '', scheduler: '', network: '', vision: '' })
 const notifierAccounts = ref<TelegramNotifierAccount[]>([])
 const notifierAccountError = ref('')
 const saveState = reactive({
@@ -41,11 +42,22 @@ const saveState = reactive({
   notifier: 'idle' as SaveState,
   scheduler: 'idle' as SaveState,
   network: 'idle' as SaveState,
+  vision: 'idle' as SaveState,
 })
-const sectionSnapshot = reactive({ basic: '', notifier: '', scheduler: '', network: '' })
+const sectionSnapshot = reactive({ basic: '', notifier: '', scheduler: '', network: '', vision: '' })
 const saveStateTimer: Partial<Record<SectionKey, number>> = {}
 
 const basicForm = reactive({ nofail: true, debug_cron: false })
+
+// 视觉识别 (仅终点站): base_url / api_key / 模型, 默认值由后端返回
+// (base_url 默认智谱根地址, 模型默认 glm-4v-flash, api_key 默认内置共享 Key).
+const visionForm = reactive({
+  base_url: 'https://open.bigmodel.cn/api/paas/v4',
+  model: 'glm-4v-flash',
+  api_key: '',
+})
+// 只读提示信息, 不参与保存对比: 环境变量是否覆盖了面板设置.
+const visionMeta = reactive({ has_api_key: false, env_overrides: [] as string[] })
 
 const notifierForm = reactive({
   notifier_enabled: false,
@@ -380,6 +392,7 @@ const buildSectionPayload = (section: SectionKey) => {
   if (section === 'basic') return { ...basicForm }
   if (section === 'notifier') return { ...notifierForm }
   if (section === 'scheduler') return buildSchedulerPayload()
+  if (section === 'vision') return { ...visionForm }
   return {
     telegram_use_proxy: networkForm.telegram_use_proxy,
     proxy: { ...networkForm.proxy },
@@ -416,6 +429,7 @@ const sectionDirty = {
   notifier: computed(() => serializeSection('notifier') !== sectionSnapshot.notifier),
   scheduler: computed(() => serializeSection('scheduler') !== sectionSnapshot.scheduler),
   network: computed(() => serializeSection('network') !== sectionSnapshot.network),
+  vision: computed(() => serializeSection('vision') !== sectionSnapshot.vision),
 }
 
 const dirtySections = computed(() => sectionOrder.filter((section) => sectionDirty[section].value))
@@ -526,6 +540,12 @@ const restoreSectionFromSnapshot = (section: SectionKey) => {
     return
   }
 
+  if (section === 'vision') {
+    Object.assign(visionForm, snapshot)
+    setSaveState(section, 'idle')
+    return
+  }
+
   Object.assign(networkForm, snapshot)
   setSaveState(section, 'idle')
 }
@@ -547,6 +567,21 @@ const loadSection = async (section: SectionKey) => {
       syncSchedulerIntervalForm()
     }
     if (section === 'network') Object.assign(networkForm, data)
+    if (section === 'vision') {
+      // 后端多返回的只读字段不进表单, 只记到 visionMeta 里做提示.
+      const visionData = data as {
+        base_url?: string
+        model?: string
+        api_key?: string
+        has_api_key?: boolean
+        env_overrides?: string[]
+      }
+      visionForm.base_url = visionData.base_url || visionForm.base_url
+      visionForm.model = visionData.model || visionForm.model
+      visionForm.api_key = visionData.api_key || ''
+      visionMeta.has_api_key = Boolean(visionData.has_api_key)
+      visionMeta.env_overrides = Array.isArray(visionData.env_overrides) ? visionData.env_overrides : []
+    }
     captureSectionSnapshot(section)
   } catch (err) {
     logger.error(`Failed to load ${section} settings`, err)
@@ -608,11 +643,13 @@ captureSectionSnapshot('basic')
 captureSectionSnapshot('notifier')
 captureSectionSnapshot('scheduler')
 captureSectionSnapshot('network')
+captureSectionSnapshot('vision')
 Promise.all([
   loadSection('basic'),
   loadSection('notifier'),
   loadSection('scheduler'),
   loadSection('network'),
+  loadSection('vision'),
   loadNotifierAccounts(),
   loadSiteNames(),
 ])
@@ -626,7 +663,7 @@ Promise.all([
           <p class="text-xs font-semibold uppercase tracking-[0.22em] text-primary-600">System Settings</p>
           <div>
             <h1 class="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">系统设置</h1>
-            <p class="mt-2 text-sm leading-6 text-slate-600">调整系统运行、通知、任务调度和网络代理等全局设置。</p>
+            <p class="mt-2 text-sm leading-6 text-slate-600">调整系统运行、通知、任务调度、网络代理和终点站视觉识别等全局设置。</p>
           </div>
         </div>
       </div>
@@ -1154,6 +1191,47 @@ Promise.all([
               <input v-model="networkForm.telegram_use_proxy" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-primary-600 focus:ring-primary-600" />
             </label>
           </div>
+        </div>
+      </UiCard>
+      </section>
+
+      <section id="vision" class="scroll-mt-6 2xl:col-span-2">
+      <UiCard class="overflow-hidden border-slate-200/70 bg-white/90">
+        <template #header>
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <h2 class="text-lg font-semibold tracking-tight text-slate-950">视觉识别（终点站）</h2>
+              <p class="mt-1 text-sm text-slate-500">终点站签到时识别验证码图片用的模型服务，仅终点站使用。</p>
+              <p v-if="loadError.vision" class="mt-2 text-sm font-medium text-rose-600">{{ loadError.vision }}</p>
+            </div>
+            <UiButton size="md" class="min-w-[88px]" :variant="getSaveButtonVariant('vision')" :disabled="isSaveButtonDisabled('vision')" :loading="saving.vision" @click="saveSection('vision')">
+              <CheckCircleIcon v-if="showSavedState('vision')" class="h-4 w-4" />
+              <span v-else>{{ getSaveButtonLabel('vision') }}</span>
+            </UiButton>
+          </div>
+        </template>
+        <div class="space-y-4">
+          <p v-if="visionMeta.env_overrides.length" class="rounded-[18px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+            当前容器环境变量 {{ visionMeta.env_overrides.join('、') }} 已设置，签到时会优先用环境变量，面板这里的修改暂时不会生效；要改用面板设置，需先清除对应的环境变量并重启后端。
+          </p>
+          <div class="grid gap-4 md:grid-cols-2">
+            <label class="space-y-2 text-sm text-slate-600 md:col-span-2">
+              <span class="font-medium text-slate-900">Base URL</span>
+              <input v-model="visionForm.base_url" type="text" class="block w-full rounded-[18px] border-0 bg-slate-50 px-4 py-3 text-slate-900 ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-primary-600" placeholder="https://open.bigmodel.cn/api/paas/v4" />
+              <p class="text-xs leading-5 text-slate-400">OpenAI 兼容的 API 根地址，不要带 /chat/completions 后缀（旧的完整地址保存时会自动去掉后缀）。</p>
+            </label>
+            <label class="space-y-2 text-sm text-slate-600">
+              <span class="font-medium text-slate-900">模型</span>
+              <input v-model="visionForm.model" type="text" class="block w-full rounded-[18px] border-0 bg-slate-50 px-4 py-3 text-slate-900 ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-primary-600" placeholder="glm-4v-flash" />
+              <p class="text-xs leading-5 text-slate-400">默认 glm-4v-flash，换服务商时填对方的视觉模型名。</p>
+            </label>
+            <label class="space-y-2 text-sm text-slate-600">
+              <span class="font-medium text-slate-900">API Key</span>
+              <input v-model="visionForm.api_key" type="password" class="block w-full rounded-[18px] border-0 bg-slate-50 px-4 py-3 text-slate-900 ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-primary-600" placeholder="未设置时使用内置默认 Key" />
+              <p class="text-xs leading-5 text-slate-400">默认是内置共享 Key，共享额度容易限流；建议填自己的 Key。留空保存后下次打开会恢复成默认 Key。</p>
+            </label>
+          </div>
+          <p class="text-xs leading-5 text-slate-400">保存后立即写入配置文件，下一次终点站签到就用新值，无需重启后端。</p>
         </div>
       </UiCard>
       </section>
